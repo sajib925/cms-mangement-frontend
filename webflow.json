@@ -1,0 +1,13 @@
+{
+  "name": "dev-kit",
+  "size": "large",
+  "apiVersion": "2",
+  "publicDir": "dist",
+  "telemetry": {
+    "global": {
+      "allowTelemetry": true,
+      "lastPrompted": 1776015369255,
+      "version": "1.13.1"
+    }
+  }
+}
