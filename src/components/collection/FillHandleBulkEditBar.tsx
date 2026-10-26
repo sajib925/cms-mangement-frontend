@@ -29,6 +29,7 @@ interface ReferenceItem {
   id: string
   fieldData: {
     name: string
+    slug?: string
   }
 }
 
@@ -726,7 +727,7 @@ const FillHandleBulkEditBar: React.FC<FillHandleBulkEditBarProps> = ({
   }
 
   return (
-    <div className="absolute bottom-[56px] z-50 flex w-full items-center justify-between gap-3 rounded-lg border border-border bg-card px-3 py-2 shadow-lg text-card-foreground">
+    <div className="absolute bottom-12 left-0 right-0 z-50 flex items-center justify-between gap-3 border border-border bg-card p-2.5">
       <div className="flex items-center gap-3">
         <p className="text-sm font-medium text-foreground">
           You’ve selected <span className="font-bold text-emerald-600 dark:text-emerald-400">{selectedCount}</span>

@@ -54,7 +54,7 @@ export default function CollectionSelector({
           role="combobox"
           aria-expanded={open}
           className={cn(
-            "h-7 shrink justify-between bg-card text-[11px] font-medium border-border hover:bg-accent hover:text-accent-foreground px-2 transition-all",
+            "h-6 shrink justify-between bg-card text-[11px] font-medium border-border hover:bg-accent hover:text-accent-foreground px-2 transition-all",
             isMax ? "min-w-35 max-w-50" : "min-w-22.5 max-w-32.5"
           )}
         >

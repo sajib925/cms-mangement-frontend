@@ -11,6 +11,7 @@ import {
   SelectTrigger,
   SelectValue
 } from "@/components/ui/select"
+import { useLocation } from "react-router"
 
 
 const sizePayloadMap: Record<ExtensionSize, "large" | { width: number; height: number }> = {
@@ -19,7 +20,10 @@ const sizePayloadMap: Record<ExtensionSize, "large" | { width: number; height: n
 }
 
 export function ResizeSelector() {
+  const location = useLocation()
   const dispatch = useAppDispatch()
+  const currentPath = location.pathname.toLowerCase().replace(/\/$/, "") || "/"
+  const isTablePage = currentPath === "/table"
   
   // Connect directly to Redux slice state
   const extensionSize = useAppSelector((state) => state.collection.extensionSize) || "large"
@@ -63,15 +67,19 @@ export function ResizeSelector() {
 
   return (
     <div className="flex items-center gap-1 shrink-0">
-      <ReloadButton />
+      {
+        isTablePage &&
+        <ReloadButton />
+      }
+      
       <Select
         value={extensionSize}
         onValueChange={(val) => applySize(val as ExtensionSize)}
       >
-        <SelectTrigger className="h-7 w-16 text-[11px] font-semibold px-2 bg-card border-border cursor-pointer shrink-0">
+        <SelectTrigger className="h-6! w-16 text-[11px] py-1! font-semibold px-2 bg-card border-border cursor-pointer shrink-0">
           <SelectValue placeholder="Size" />
         </SelectTrigger>
-        <SelectContent className="z-50 bg-card border-border min-w-18.75">
+        <SelectContent className="z-50 bg-card border-border min-w-16 ring-0">
           <SelectItem value="large" className="text-xs cursor-pointer font-medium">
             LG
           </SelectItem>

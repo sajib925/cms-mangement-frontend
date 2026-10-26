@@ -3,13 +3,13 @@ import { useAppDispatch } from "@/redux/hooks"
 import { dataApi } from "@/redux/api/dataApi"
 import { RefreshCcw } from "lucide-react"
 
-// declare global {
-//   interface Window {
-//     webflow: {
-//       notify: (options: { type: "Success" | "Error" | "Warning" | "Info"; message: string }) => void
-//     }
-//   }
-// }
+declare global {
+  interface Window {
+    webflow: {
+      notify: (options: { type: "Success" | "Error" | "Warning" | "Info"; message: string }) => void
+    }
+  }
+}
 
 const ReloadButton = () => {
   const [spinning, setSpinning] = useState(false)
@@ -42,7 +42,7 @@ const ReloadButton = () => {
       title="Reload Data"
     >
       <RefreshCcw
-        className={`w-5 h-5 transition-transform ${
+        className={`w-4 h-4 transition-transform ${
           spinning ? "animate-spin" : ""
         }`}
       />

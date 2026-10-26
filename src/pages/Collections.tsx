@@ -2,6 +2,7 @@
 
 import type React from "react"
 import { useState, useEffect, useRef, useMemo } from "react"
+import type { WebflowGlobal } from "@/types/webflow" 
 import { X, Copy, FolderPlus, Edit2, PlusCircle, AlertTriangle, Plus, Trash2 } from "lucide-react"
 
 // Redux Hooks & Slice Actions
@@ -20,16 +21,26 @@ import {
   setReferenceCollections,
 } from "@/redux/collectionSlice"
 
-// RTK Query Hooks
+// RTK Query Hooks - IMPORTING BOTH LIVE AND STAGING APIS
 import {
   useListCollectionsQuery,
   useGetCollectionDetailsQuery,
+  
+  // Staging
   useListItemsQuery,
   useLazyListItemsQuery,
   useInsertItemsMutation,
   useUpdateItemsMutation,
   useDeleteItemsMutation,
   usePublishItemsMutation,
+  
+  // Live
+  useListItemsLiveQuery,
+  useCreateItemLiveMutation,
+  useUpdateItemsLiveMutation,
+  useDeleteItemsLiveMutation,
+
+  // Collection/Field Mutations
   useCreateCollectionMutation,
   useUpdateCollectionMutation,
   useDeleteCollectionMutation,
@@ -42,6 +53,7 @@ import TableHeader from "@/components/collection/TableHeader"
 import Pagination from "@/components/collection/Pagination"
 import BulkEditField from "@/components/collection/BulkEditField"
 import RenderFieldInput from "@/components/collection/RenderFieldInput"
+import FillHandleBulkEditBar from "@/components/collection/FillHandleBulkEditBar"
 import { Checkbox } from "@/components/ui/checkbox"
 import { cleanEmptyFields, generateSlug, handleDuplicateItem, useDynamicItems } from "@/lib/helper"
 import type { ExtendedItem, FieldDefinition } from "@/types"
@@ -54,19 +66,17 @@ import Skeleton, { SkeletonTheme } from "react-loading-skeleton"
 import { Button } from "@/components/ui/button"
 import CustomButton from "@/components/common/Button"
 import toast from "react-hot-toast"
+import { cn } from "@/lib/utils"
 
-declare global {
-  interface Window {
-    webflow: {
-      notify: (options: { type: "Success" | "Error" | "Warning" | "Info"; message: string }) => void
-      getSiteInfo: () => Promise<{ siteId: string }>
-    }
-  }
-}
+// Import the new CSV Import Modal
+import CsvImportModal from "@/components/collection/CsvImportModal"
 
 interface ReferenceItem {
   id: string
-  fieldData: { name: string }
+  fieldData: {
+    name: string
+    slug?: string 
+  }
 }
 
 interface CollectionsProps {
@@ -94,6 +104,26 @@ const SUPPORTED_FIELD_TYPES = [
   { label: "Multi-Reference", value: "MultiReference" },
 ]
 
+const parseWebflowError = (err: any): string => {
+  const msg = err?.data?.message || err?.message || err?.error || "";
+  const lowerMsg = msg.toLowerCase();
+
+  if (lowerMsg.includes("publish") && lowerMsg.includes("queue")) {
+    return "Action blocked. Your site has structural changes waiting in the queue. Please open the Webflow Designer and publish your site first.";
+  }
+  if (lowerMsg.includes("structure changed") || err?.status === 409) {
+    return "Collection structure changed. Please publish your site from the Webflow Designer before updating items.";
+  }
+  if (lowerMsg.includes("validation")) {
+    return "Validation failed. Please check if required fields are filled correctly.";
+  }
+  if (lowerMsg.includes("rate limit")) {
+    return "Too many requests. Please wait a moment and try again.";
+  }
+  
+  return msg || "An unexpected error occurred. Please try again.";
+}
+
 export default function Collections({ onNavigateToLicense }: CollectionsProps) {
   const dispatch = useAppDispatch()
 
@@ -111,7 +141,10 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     sortKey,
     sortOrder,
     lastUpdatedFilter,
+    environmentMode,
   } = useAppSelector((state) => state.collection)
+
+  const isLiveMode = environmentMode === "live";
 
   const [siteId, setSiteId] = useState("")
   const [activeDialog, setActiveDialog] = useState<null | {
@@ -120,7 +153,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     type: "Reference" | "MultiReference" | "PlainText" | "RichText"
   }>(null)
 
-  // Create & Edit Collection Modal States
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false)
   const [isEditCollectionModalOpen, setIsEditCollectionModalOpen] = useState(false)
   const [editingCollectionData, setEditingCollectionData] = useState<{ id: string; name: string; singularName: string; slug: string } | null>(null)
@@ -128,7 +160,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
   const [newCollectionSlug, setNewCollectionSlug] = useState("")
   const [singularName, setSingularName] = useState("")
 
-  // Create Field Modal State
   const [isCreateFieldModalOpen, setIsCreateFieldModalOpen] = useState(false)
   const [fieldDisplayName, setFieldDisplayName] = useState("")
   const [fieldHelpText, setFieldHelpText] = useState("")
@@ -137,7 +168,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
   const [referencedCollectionId, setReferencedCollectionId] = useState("")
   const [fieldOptions, setFieldOptions] = useState<string[]>(["Option 1", "Option 2"])
 
-  // Edit Field Modal State
   const [isEditFieldModalOpen, setIsEditFieldModalOpen] = useState(false)
   const [editingFieldData, setEditingFieldData] = useState<{
     id: string
@@ -150,16 +180,33 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     options: Array<{ id?: string; name: string }>
   } | null>(null)
 
-  // Field Delete Modal State
   const [fieldToDelete, setFieldToDelete] = useState<{ id: string; slug: string; displayName: string } | null>(null)
+
+  // ---------------------------------------------------------
+  // CSV IMPORT STATE
+  // ---------------------------------------------------------
+  const [isCsvImportModalOpen, setIsCsvImportModalOpen] = useState(false)
+
+  // ---------------------------------------------------------
+  // FILL HANDLE STATE & VERTICAL MULTI-row DRAG SELECTION
+  // ---------------------------------------------------------
+  const [fillColumnKey, setFillColumnKey] = useState<string | null>(null);
+  const [fillSelectedIds, setFillSelectedIds] = useState<string[]>([]);
+  const [fillHandleValue, setFillHandleValue] = useState<any>(null);
+
+  // Drag Tracking States
+  const [fillDragStartId, setFillDragStartId] = useState<string | null>(null);
+  const [fillDragCurrentId, setFillDragCurrentId] = useState<string | null>(null);
 
   const tableRef = useRef<HTMLTableElement>(null)
 
   useEffect(() => {
     const getSiteId = async () => {
       try {
-        if (window.webflow?.getSiteInfo) {
-          const { siteId } = await window.webflow.getSiteInfo()
+        const wf = window.webflow as WebflowGlobal | undefined;
+
+        if (wf?.getSiteInfo) {
+          const { siteId } = await wf.getSiteInfo()
           setSiteId(siteId)
         }
       } catch (e) {
@@ -169,7 +216,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     getSiteId()
   }, [])
 
-  // RTK Queries
   const { data: collectionsData, isLoading: isCollectionsLoading } = useListCollectionsQuery(siteId, { skip: !siteId })
   const collections = (collectionsData as any)?.data?.collections || (collectionsData as any)?.collections || EMPTY_ARRAY
 
@@ -186,17 +232,29 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
   
   const collectionSchema: FieldDefinition[] = (schemaData as any)?.data?.fields || (schemaData as any)?.fields || EMPTY_ARRAY
 
-  const { data: itemsData, isLoading: isItemsLoading } = useListItemsQuery(
+  const { data: stagingItemsData, isLoading: isStagingLoading } = useListItemsQuery(
     { siteId, collectionId: selectedCollectionId },
-    { skip: !selectedCollectionId || !siteId }
+    { skip: !selectedCollectionId || !siteId || isLiveMode }
   )
-  const items: ExtendedItem[] = (itemsData as any)?.data?.items || (itemsData as any)?.items || EMPTY_ARRAY
+  const { data: liveItemsData, isLoading: isLiveLoading } = useListItemsLiveQuery(
+    { siteId, collectionId: selectedCollectionId },
+    { skip: !selectedCollectionId || !siteId || !isLiveMode }
+  )
 
-  // Mutations
-  const [updateItemsMutation, { isLoading: isUpdating }] = useUpdateItemsMutation()
-  const [deleteItemsMutation] = useDeleteItemsMutation()
-  const [insertItemsMutation] = useInsertItemsMutation()
+  const isItemsLoading = isStagingLoading || isLiveLoading;
+  const activeItemsData = isLiveMode ? liveItemsData : stagingItemsData;
+  const items: ExtendedItem[] = (activeItemsData as any)?.data?.items || (activeItemsData as any)?.items || EMPTY_ARRAY
+
+  const [updateStagingItems, { isLoading: isUpdatingStaging }] = useUpdateItemsMutation()
+  const [updateLiveItems, { isLoading: isUpdatingLive }] = useUpdateItemsLiveMutation()
+  const isUpdating = isUpdatingStaging || isUpdatingLive;
+
+  const [deleteStagingItems] = useDeleteItemsMutation()
+  const [deleteLiveItems] = useDeleteItemsLiveMutation()
+  const [insertStagingItems] = useInsertItemsMutation()
+  const [insertLiveItems] = useCreateItemLiveMutation()
   const [publishItemsMutation] = usePublishItemsMutation()
+
   const [createCollection, { isLoading: isCreatingCollection }] = useCreateCollectionMutation()
   const [updateCollection, { isLoading: isUpdatingCollection }] = useUpdateCollectionMutation()
   const [deleteCollection] = useDeleteCollectionMutation()
@@ -206,6 +264,59 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
 
   const [triggerFetchReferenceItems] = useLazyListItemsQuery()
 
+  // ---------------------------------------------------------
+  // CSV EXPORT HANDLER
+  // ---------------------------------------------------------
+  const handleExportCsv = () => {
+    if (!items || items.length === 0) {
+      toast.error("No items available to export.");
+      return;
+    }
+
+    try {
+      // 🔍 সিলেক্টেড কালেকশনের অবজেক্ট খুঁজে বের করা যাতে নাম পাওয়া যায়
+      const currentCollection = collections.find((col: any) => col.id === selectedCollectionId);
+      const rawCollectionName = currentCollection?.displayName || currentCollection?.name || "collection";
+      
+      // ফাইলের নামের জন্য একটি ক্লিন স্লাগ বা ফরম্যাট তৈরি (যেমন: "Blog Posts" -> "blog-posts")
+      const collectionSlugName = rawCollectionName
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+
+      const headers = columnOrder.filter(key => !["status", "lastUpdated", "createdOn"].includes(key));
+      
+      const csvRows = [];
+      csvRows.push(headers.join(","));
+
+      items.forEach(item => {
+        const rowValues = headers.map(header => {
+          let val = item.fieldData?.[header] ?? "";
+          if (typeof val === "object") val = JSON.stringify(val);
+          const escaped = String(val).replace(/"/g, '""');
+          return `"${escaped}"`;
+        });
+        csvRows.push(rowValues.join(","));
+      });
+
+      const blob = new Blob([csvRows.join("\n")], { type: "text/csv;charset=utf-8;" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.setAttribute("href", url);
+      
+      // 🎯 এখন থেকে ফাইলনেমে কালেকশনের নাম দেখাবে (যেমন: blog-posts-export.csv)
+      link.setAttribute("download", `${collectionSlugName}-export.csv`);
+      
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      toast.success("CSV exported successfully!");
+    } catch (error) {
+      console.error("Export error:", error);
+      toast.error("Failed to export CSV.");
+    }
+  };
 
   useEffect(() => {
     const handleAddNewItemEvent = () => handleAddNewItem()
@@ -229,6 +340,8 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     const handleDeleteCol = (e: any) => {
       if (e.detail) handleDeleteCollectionSubmit(e.detail)
     }
+    const handleOpenCsvImport = () => setIsCsvImportModalOpen(true)
+    const handleExportCsvEvent = () => handleExportCsv()
 
     window.addEventListener("trigger-add-new-item", handleAddNewItemEvent)
     window.addEventListener("trigger-save-new-items", handleSaveNewEvent)
@@ -239,6 +352,8 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     window.addEventListener("trigger-open-create-field-modal", handleOpenCreateField)
     window.addEventListener("trigger-open-edit-collection", handleOpenEditCol)
     window.addEventListener("trigger-delete-collection", handleDeleteCol)
+    window.addEventListener("trigger-open-csv-import", handleOpenCsvImport)
+    window.addEventListener("trigger-export-csv", handleExportCsvEvent)
 
     return () => {
       window.removeEventListener("trigger-add-new-item", handleAddNewItemEvent)
@@ -250,10 +365,11 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
       window.removeEventListener("trigger-open-create-field-modal", handleOpenCreateField)
       window.removeEventListener("trigger-open-edit-collection", handleOpenEditCol)
       window.removeEventListener("trigger-delete-collection", handleDeleteCol)
+      window.removeEventListener("trigger-open-csv-import", handleOpenCsvImport)
+      window.removeEventListener("trigger-export-csv", handleExportCsvEvent)
     }
-  }, [newItems, editedItems, selectedIds, siteId, selectedCollectionId, collectionSchema])
+  }, [newItems, editedItems, selectedIds, siteId, selectedCollectionId, collectionSchema, isLiveMode, items])
 
-  // Field Options Handlers
   const handleAddCreateOption = () => setFieldOptions((prev) => [...prev, `Option ${prev.length + 1}`])
   const handleUpdateCreateOption = (index: number, val: string) => {
     setFieldOptions((prev) => {
@@ -264,7 +380,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
   }
   const handleRemoveCreateOption = (index: number) => setFieldOptions((prev) => prev.filter((_, i) => i !== index))
 
-  // Field Create Handler
   const handleCreateFieldSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!fieldDisplayName.trim() || !selectedCollectionId || !siteId) return
@@ -304,7 +419,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
         body: bodyPayload,
       }).unwrap()
 
-      toast.success("Field created successfully!")
+      toast.success("Field created successfully! (Publish site to sync)")
       setIsCreateFieldModalOpen(false)
       setFieldDisplayName("")
       setFieldHelpText("")
@@ -313,11 +428,10 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
       setReferencedCollectionId("")
       setFieldOptions(["Option 1", "Option 2"])
     } catch (err: any) {
-      toast.error(err?.data?.message || "Failed to create field.")
+      toast.error(parseWebflowError(err))
     }
   }
 
-  // Field Edit Open Handler
   const handleOpenEditField = (field: FieldDefinition) => {
     const defaultRefCol = collections.length > 0 ? collections[0].id : ""
     const targetRefCol =
@@ -383,7 +497,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     }
 
     if (editingFieldData.type === "Option") {
-      const validOptions = editingFieldData.options.map((opt) => opt.name.trim()).filter(Boolean)
+      const validOptions = editingFieldData.options.map((opt: any) => opt.name.trim()).filter(Boolean)
       if (validOptions.length === 0) {
         toast.error("Please add at least one option.")
         return
@@ -402,8 +516,8 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     } else if (editingFieldData.type === "Option") {
       bodyPayload.metadata = {
         options: editingFieldData.options
-          .filter((opt) => opt.name.trim())
-          .map((opt) => (opt.id ? { id: opt.id, name: opt.name.trim() } : { name: opt.name.trim() })),
+          .filter((opt: any) => opt.name.trim())
+          .map((opt: any) => (opt.id ? { id: opt.id, name: opt.name.trim() } : { name: opt.name.trim() })),
       }
     }
 
@@ -415,11 +529,11 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
         body: bodyPayload,
       }).unwrap()
 
-      toast.success("Field updated successfully!")
+      toast.success("Field updated successfully! (Publish site to sync)")
       setIsEditFieldModalOpen(false)
       setEditingFieldData(null)
     } catch (err: any) {
-      toast.error(err?.data?.message || "Failed to update field.")
+      toast.error(parseWebflowError(err))
     }
   }
 
@@ -446,7 +560,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
       toast.success("Field deleted successfully!")
       setFieldToDelete(null)
     } catch (err: any) {
-      toast.error(err?.data?.message || "Failed to delete field.")
+      toast.error(parseWebflowError(err))
     }
   }
 
@@ -468,7 +582,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
       setIsEditCollectionModalOpen(false)
       setEditingCollectionData(null)
     } catch (err: any) {
-      toast.error(err?.data?.message || "Failed to update collection.")
+      toast.error(parseWebflowError(err))
     }
   }
 
@@ -483,7 +597,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
         dispatch(setSelectedCollectionId(""))
       }
     } catch (err: any) {
-      toast.error(err?.data?.message || "Failed to delete collection.")
+      toast.error(parseWebflowError(err))
     }
   }
 
@@ -505,23 +619,19 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
       for (const field of referenceFields) {
         if (field.collectionId) {
           try {
-            // ১. রেসপন্সটি সরাসরি অ্যারে নয়, তাই any টাইপ দিয়ে রিসিভ করা হলো
             const res: any = await triggerFetchReferenceItems({ siteId, collectionId: field.collectionId }, true).unwrap()
-            
-            // ২. JSON স্ট্রাকচার অনুযায়ী data.items থেকে অ্যারে বের করে আনা হলো
             const itemsArray: any[] = res?.data?.items || res?.items || []
             
-            // ৩. এখন ম্যাপ এবং ফিল্টার সঠিকভাবে কাজ করবে
             const validReferenceItems: ReferenceItem[] = itemsArray
               .filter((item) => item?.fieldData && typeof item.fieldData.name === "string")
               .map((item) => ({
                 id: String(item.id),
                 fieldData: {
                   name: item.fieldData.name,
+                  slug: item.fieldData.slug,
                 },
               }))
             
-            console.log(`Valid items for ${field.slug}:`, validReferenceItems)
             newReferenceCollections[field.slug] = validReferenceItems
           } catch (error) {
              console.error("Error fetching reference items:", error)
@@ -529,7 +639,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
         }
       }
       
-      // ৪. Redux action হওয়ায় অবশ্যই dispatch এর ভেতরে কল করতে হবে
       dispatch(setReferenceCollections(newReferenceCollections))
     }
 
@@ -564,7 +673,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
       setNewCollectionSlug("")
       setSingularName("")
     } catch (err: any) {
-      toast.error(err?.data?.message || "Failed to create collection.")
+      toast.error(parseWebflowError(err))
     }
   }
 
@@ -579,24 +688,61 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
 
   const prioritizeFields = useMemo(() => ["name", "slug", "status"], [])
 
-  const [columnOrder, setColumnOrder] = useState<string[]>(() => [
-    ...prioritizeFields.filter((key) => allFieldKeys.includes(key)),
-    ...allFieldKeys.filter((key) => !prioritizeFields.includes(key)),
-  ])
-
-  useEffect(() => {
-    const reordered = [
+  const [columnOrder, setColumnOrder] = useState<string[]>(() => {
+    const defaultOrder = [
       ...prioritizeFields.filter((key) => allFieldKeys.includes(key)),
       ...allFieldKeys.filter((key) => !prioritizeFields.includes(key)),
-    ]
+    ];
+    
+    if (typeof window !== "undefined" && selectedCollectionId) {
+      const savedOrder = localStorage.getItem(`col-order-${selectedCollectionId}`);
+      if (savedOrder) {
+        try {
+          const parsed = JSON.parse(savedOrder);
+          const filteredSaved = parsed.filter((key: string) => allFieldKeys.includes(key));
+          const missingKeys = defaultOrder.filter((key) => !filteredSaved.includes(key));
+          return [...filteredSaved, ...missingKeys];
+        } catch (e) {
+          console.error("Failed to parse saved column order", e);
+        }
+      }
+    }
+    return defaultOrder;
+  })
+
+  useEffect(() => {
+    const defaultReordered = [
+      ...prioritizeFields.filter((key) => allFieldKeys.includes(key)),
+      ...allFieldKeys.filter((key) => !prioritizeFields.includes(key)),
+    ];
+
+    if (selectedCollectionId) {
+      const savedOrder = localStorage.getItem(`col-order-${selectedCollectionId}`);
+      if (savedOrder) {
+        try {
+          const parsed = JSON.parse(savedOrder);
+          const filteredSaved = parsed.filter((key: string) => allFieldKeys.includes(key));
+          const missingKeys = defaultReordered.filter((key) => !filteredSaved.includes(key));
+          
+          setColumnOrder((prev) => {
+            const newOrder = [...filteredSaved, ...missingKeys];
+            if (prev.length === newOrder.length && prev.every((val, index) => val === newOrder[index])) return prev;
+            return newOrder;
+          });
+          return;
+        } catch (e) {
+          console.error("Error loading column order", e);
+        }
+      }
+    }
 
     setColumnOrder((prev) => {
-      if (prev.length === reordered.length && prev.every((val, index) => val === reordered[index])) {
-        return prev
+      if (prev.length === defaultReordered.length && prev.every((val, index) => val === defaultReordered[index])) {
+        return prev;
       }
-      return reordered
-    })
-  }, [allFieldKeys, prioritizeFields])
+      return defaultReordered;
+    });
+  }, [allFieldKeys, prioritizeFields, selectedCollectionId]) 
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
 
@@ -621,7 +767,14 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     if (active.id !== over.id) {
       const oldIndex = columnOrder.indexOf(active.id)
       const newIndex = columnOrder.indexOf(over.id)
-      setColumnOrder((items) => arrayMove(items, oldIndex, newIndex))
+      const newOrder = arrayMove(columnOrder, oldIndex, newIndex)
+      
+      setColumnOrder(newOrder)
+
+      // 🎯 ড্র্যাগ করা শেষ হলে লোকাল স্টোরেজে নতুন অর্ডারটি সেভ করা
+      if (selectedCollectionId) {
+        localStorage.setItem(`col-order-${selectedCollectionId}`, JSON.stringify(newOrder))
+      }
     }
   }
 
@@ -660,6 +813,71 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     getReferenceItemName,
   })
 
+  const effectiveFillIds = useMemo(() => {
+    const baseSet = new Set(fillSelectedIds);
+    
+    if (fillDragStartId && fillDragCurrentId && fillColumnKey) {
+      const allIds = paginatedItems.map(i => i.id);
+      const startIdx = allIds.indexOf(fillDragStartId);
+      const endIdx = allIds.indexOf(fillDragCurrentId);
+      
+      if (startIdx !== -1 && endIdx !== -1) {
+        const min = Math.min(startIdx, endIdx);
+        const max = Math.max(startIdx, endIdx);
+        for (let i = min; i <= max; i++) {
+          baseSet.add(allIds[i]);
+        }
+      }
+    }
+    return Array.from(baseSet);
+  }, [fillSelectedIds, fillDragStartId, fillDragCurrentId, fillColumnKey, paginatedItems]);
+
+  const handleFillMouseDown = (id: string, columnKey: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault(); 
+
+    if (fillColumnKey !== columnKey) {
+      setFillColumnKey(columnKey);
+      if (e.ctrlKey || e.metaKey) {
+        setFillSelectedIds([id]);
+      } else {
+        setFillSelectedIds([]);
+        setFillDragStartId(id);
+        setFillDragCurrentId(id);
+      }
+      setFillHandleValue(null);
+      return;
+    }
+
+    if (e.ctrlKey || e.metaKey) {
+      setFillSelectedIds(prev => 
+        prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+      );
+    } else {
+      setFillSelectedIds([]);
+      setFillDragStartId(id);
+      setFillDragCurrentId(id);
+    }
+  };
+
+  const handleFillMouseEnter = (id: string, columnKey: string) => {
+    if (fillDragStartId && fillColumnKey === columnKey) {
+      setFillDragCurrentId(id);
+    }
+  };
+
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      if (fillDragStartId) {
+        setFillSelectedIds(effectiveFillIds);
+        setFillDragStartId(null);
+        setFillDragCurrentId(null);
+      }
+    };
+    window.addEventListener("mouseup", handleGlobalMouseUp);
+    return () => window.removeEventListener("mouseup", handleGlobalMouseUp);
+  }, [fillDragStartId, effectiveFillIds]);
+
   const toggleSelectedId = (id: string) => {
     const updated = selectedIds.includes(id)
       ? selectedIds.filter((i) => i !== id)
@@ -668,8 +886,26 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
   }
 
   const handleUpdateEditedItem = (id: string, key: string, value: any) => {
-    const prevEdited = editedItems[id] || {}
-    dispatch(setEditedItems({ ...editedItems, [id]: { ...prevEdited, [key]: value } }))
+    const originalItem = items.find((i) => i.id === id)
+    const originalValue = originalItem?.fieldData?.[key]
+    const isSame = JSON.stringify(originalValue || null) === JSON.stringify(value || null)
+
+    const prevEdited = { ...(editedItems[id] || {}) }
+
+    if (isSame) {
+      delete prevEdited[key]
+    } else {
+      prevEdited[key] = value
+    }
+
+    const updatedEditedItems = { ...editedItems }
+
+    if (Object.keys(prevEdited).length === 0) {
+      delete updatedEditedItems[id]
+    } else {
+      updatedEditedItems[id] = prevEdited
+    }
+    dispatch(setEditedItems(updatedEditedItems))
   }
 
   const handleBulkColumnUpdate = async () => {
@@ -687,11 +923,15 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
 
     if (itemsToUpdate.length > 0) {
       try {
-        await updateItemsMutation({ siteId, collectionId: selectedCollectionId, body: { items: itemsToUpdate } }).unwrap()
-        toast.success("Items updated successfully!")
+        if (isLiveMode) {
+          await updateLiveItems({ siteId, collectionId: selectedCollectionId, body: { items: itemsToUpdate } }).unwrap()
+        } else {
+          await updateStagingItems({ siteId, collectionId: selectedCollectionId, body: { items: itemsToUpdate } }).unwrap()
+        }
+        toast.success(`Items updated successfully in ${isLiveMode ? 'Live' : 'Staging'}!`)
         dispatch(setEditedItems({}))
-      } catch {
-        toast.error("Failed to update items.")
+      } catch (err: any) {
+        toast.error(parseWebflowError(err))
       }
     }
 
@@ -699,38 +939,80 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     dispatch(setBulkEditValue(""))
   }
 
+  const handlePartialBulkUpdate = async () => {
+    if (!fillColumnKey || effectiveFillIds.length === 0) return;
+    
+    const updatedItems = { ...editedItems };
+    const itemsToUpdate: Array<{ id: string; fieldData: Record<string, any> }> = [];
+
+    effectiveFillIds.forEach((id) => {
+      if (["lastUpdated", "createdOn", "status"].includes(fillColumnKey)) return;
+      updatedItems[id] = { ...(updatedItems[id] || {}), [fillColumnKey]: fillHandleValue };
+      itemsToUpdate.push({ id, fieldData: { [fillColumnKey]: fillHandleValue } });
+    });
+
+    dispatch(setEditedItems(updatedItems));
+
+    if (itemsToUpdate.length > 0) {
+      try {
+        if (isLiveMode) {
+          await updateLiveItems({ siteId, collectionId: selectedCollectionId, body: { items: itemsToUpdate } }).unwrap();
+        } else {
+          await updateStagingItems({ siteId, collectionId: selectedCollectionId, body: { items: itemsToUpdate } }).unwrap();
+        }
+        toast.success(`Successfully updated ${itemsToUpdate.length} selected items!`);
+        dispatch(setEditedItems({})); 
+      } catch (err: any) {
+        toast.error(parseWebflowError(err));
+      }
+    }
+    
+    setFillColumnKey(null);
+    setFillSelectedIds([]);
+    setFillHandleValue(null);
+  };
+
   const handleSaveAll = async () => {
     const payload = {
       items: Object.entries(editedItems).map(([id, fields]) => ({ id, fieldData: cleanEmptyFields(fields) })),
     }
 
     try {
-      await updateItemsMutation({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
-      toast.success("Items updated successfully!")
+      if (isLiveMode) {
+        await updateLiveItems({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
+      } else {
+        await updateStagingItems({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
+      }
+      toast.success(`Items updated successfully in ${isLiveMode ? 'Live' : 'Staging'}!`)
       dispatch(setEditedItems({}))
-    } catch {
-      toast.error("Failed to update items.")
+    } catch (err: any) {
+      toast.error(parseWebflowError(err))
     }
   }
 
   const handleDeleteSelected = async () => {
     try {
-      await deleteItemsMutation({ siteId, collectionId: selectedCollectionId, body: { items: selectedIds.map((id) => ({ id })) } }).unwrap()
-      toast.success("Items deleted successfully!")
+      const payload = { items: selectedIds.map((id) => ({ id })) }
+      if (isLiveMode) {
+        await deleteLiveItems({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
+      } else {
+        await deleteStagingItems({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
+      }
+      toast.success(`Items deleted successfully from ${isLiveMode ? 'Live' : 'Staging'}!`)
       dispatch(setSelectedIds([]))
-    } catch {
-      toast.error("Failed to delete items.")
+    } catch (err: any) {
+      toast.error(parseWebflowError(err))
     }
   }
 
   const handlePublishSelected = async () => {
-    if (selectedIds.length === 0) return
+    if (selectedIds.length === 0 || isLiveMode) return
     try {
       await publishItemsMutation({ siteId, collectionId: selectedCollectionId, body: { itemIds: selectedIds } }).unwrap()
       toast.success("Items published successfully!")
       dispatch(setSelectedIds([]))
-    } catch {
-      toast.error("Failed to publish items.")
+    } catch (err: any) {
+      toast.error(parseWebflowError(err))
     }
   }
 
@@ -765,11 +1047,15 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
     }
 
     try {
-      await insertItemsMutation({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
-      toast.success("Items created successfully!")
+      if (isLiveMode) {
+        await insertLiveItems({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
+      } else {
+        await insertStagingItems({ siteId, collectionId: selectedCollectionId, body: payload }).unwrap()
+      }
+      toast.success(`Items created successfully in ${isLiveMode ? 'Live' : 'Staging'}!`)
       dispatch(setNewItems({}))
-    } catch {
-      toast.error("Failed to create items.")
+    } catch (err: any) {
+      toast.error(parseWebflowError(err))
     }
   }
 
@@ -781,7 +1067,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
 
   return (
     <div className="relative flex h-full w-full flex-col overflow-hidden bg-background text-foreground">
-      {/* Table Main Render */}
       {isCollectionsLoading || isItemsLoading || isFilterLoading ? (
         <div className="flex-1 w-full p-4 bg-background">
           <SkeletonTheme baseColor="var(--muted)" highlightColor="var(--accent)">
@@ -833,7 +1118,6 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
                       </tr>
                     ) : (
                       <>
-                        {/* New Unsaved Items */}
                         {Object.entries(newItems).map(([tempId, fieldData]) => (
                           <tr key={tempId} className="bg-accent/40 hover:bg-accent/60 transition-colors">
                             <td className="border-b border-r border-border text-center p-1">
@@ -863,9 +1147,8 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
                                   editedItemsCount={Object.keys(editedItems).length}
                                   onUpdate={handleUpdateNewItem}
                                   getReferenceItemName={getReferenceItemName}
-                                  onFillHandleMouseDown={() => {}}
+                                  
                                   isSelectedForFill={false}
-                                  isFillHandleActive={false}
                                   activeDialog={activeDialog}
                                   setActiveDialog={setActiveDialog}
                                 />
@@ -888,11 +1171,13 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
                           </tr>
                         ))}
 
-                        {/* Existing Paginated Items */}
                         {paginatedItems.map((item) => {
                           const { id } = item
                           return (
-                            <tr key={id} className="hover:bg-accent/30 transition-colors">
+                            <tr
+                              key={id}
+                              className={cn("hover:bg-accent/30 transition-colors")}
+                            >
                               <td className="border-b border-r border-border px-2 text-center">
                                 <Checkbox
                                   checked={selectedIds.includes(id)}
@@ -901,7 +1186,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
                                 />
                               </td>
                               {columnOrder.map((key) => (
-                                <td key={key} className="border-b border-r border-border">
+                                <td key={key} className="border-b border-r border-border p-0">
                                   <RenderFieldInput
                                     item={item}
                                     fieldKey={key}
@@ -914,9 +1199,11 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
                                     referenceItemName="Select..."
                                     onUpdate={handleUpdateEditedItem}
                                     getReferenceItemName={getReferenceItemName}
-                                    onFillHandleMouseDown={() => {}}
-                                    isSelectedForFill={false}
-                                    isFillHandleActive={false}
+                                    
+                                    isSelectedForFill={fillColumnKey === key && effectiveFillIds.includes(id)}
+                                    onFillHandleMouseDown={(itemId, fieldKey, e) => handleFillMouseDown(itemId, fieldKey, e)}
+                                    onFillHandleMouseEnter={(itemId, fieldKey) => handleFillMouseEnter(itemId, fieldKey)}
+
                                     activeDialog={activeDialog}
                                     setActiveDialog={setActiveDialog}
                                   />
@@ -949,9 +1236,9 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
         </div>
       )}
 
-      {/* Floating Bulk Edit Bar */}
+      {/* Floating Full Bulk Edit Bar */}
       {bulkEditColumn && (
-        <div className="absolute bottom-14 left-4 right-4 z-50 flex items-center justify-between gap-3 rounded-lg border border-border bg-card p-2.5 shadow-lg">
+        <div className="absolute bottom-12 left-0 right-0 z-50 flex items-center justify-between gap-3 border border-border bg-card p-2.5">
           <div className="flex items-center gap-2 text-xs font-medium text-foreground">
             <span>Bulk Edit:</span>
             <span className="rounded bg-accent px-1.5 py-0.5 font-mono text-primary">{bulkEditColumn}</span>
@@ -975,6 +1262,24 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
             </CustomButton>
           </div>
         </div>
+      )}
+
+      {/* FLOATING PARTIAL (FILL HANDLE) BULK EDIT BAR */}
+      {fillColumnKey && effectiveFillIds.length > 0 && (
+        <FillHandleBulkEditBar
+          selectedCount={effectiveFillIds.length}
+          fieldDefinition={getFieldDefinition(fillColumnKey)}
+          isLoading={isUpdating}
+          bulkEditValue={fillHandleValue}
+          onChange={(val) => setFillHandleValue(val)}
+          onApply={handlePartialBulkUpdate}
+          onCancel={() => { 
+            setFillColumnKey(null); 
+            setFillSelectedIds([]);
+            setFillHandleValue(null);
+          }}
+          referenceItems={getReferenceItems(fillColumnKey)}
+        />
       )}
 
       {/* Footer Pagination */}
@@ -1260,7 +1565,7 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
                     </button>
                   </div>
                   <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
-                    {editingFieldData.options.map((option, idx) => (
+                    {editingFieldData.options.map((option: any, idx: number) => (
                       <div key={idx} className="flex items-center gap-2">
                         <input
                           type="text"
@@ -1419,6 +1724,19 @@ export default function Collections({ onNavigateToLicense }: CollectionsProps) {
           </div>
         </div>
       )}
+
+      {/* CSV Import Modal */}
+      <CsvImportModal 
+        isOpen={isCsvImportModalOpen}
+        onClose={() => setIsCsvImportModalOpen(false)}
+        siteId={siteId}
+        collectionId={selectedCollectionId}
+        collectionSchema={collectionSchema}
+        collections={collections}
+        referenceCollections={referenceCollections}
+        isLiveMode={isLiveMode}
+        onComplete={() => {}}
+      />
     </div>
   )
 }

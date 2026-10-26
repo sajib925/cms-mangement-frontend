@@ -11,6 +11,7 @@ export type ExtensionSize = "large" | "max"
 export interface CollectionState {
   extensionWidth: number
   extensionHeight: number
+  environmentMode: "staging" | "live"
   extensionSize: ExtensionSize
   licenseInfo: LicenseInfo
   selectedCollectionId: string
@@ -30,6 +31,7 @@ export interface CollectionState {
 
 const initialState: CollectionState = {
   extensionSize: "large",
+  environmentMode: "staging",
   extensionWidth: sizeMap.large.width,
   extensionHeight: sizeMap.large.height,
   licenseInfo: {
@@ -65,6 +67,9 @@ export const collectionSlice = createSlice({
       state.extensionSize = size
       state.extensionWidth = width
       state.extensionHeight = height
+    },
+    setEnvironmentMode: (state, action: PayloadAction<"staging" | "live">) => {
+      state.environmentMode = action.payload;
     },
     setExtensionDimensions: (
       state,
@@ -130,6 +135,7 @@ export const collectionSlice = createSlice({
 export const {
   setExtensionSize,
   setExtensionDimensions,
+  setEnvironmentMode,
   setLicenseInfo,
   setSelectedCollectionId,
   setSearchQuery,
